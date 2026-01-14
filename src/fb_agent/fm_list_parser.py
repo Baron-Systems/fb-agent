@@ -11,43 +11,60 @@ def parse_fm_list_output(output: str) -> list[dict[str, Any]]:
     """
     Parse `fm list` output robustly.
     
-    Expected format (example):
+    Supports both formats:
+    1. Table format (new):
+        ┃ Site                 ┃ Status   ┃ Path    ┃
+        │ dev.mby-solution.vip │ Inactive │ /path   │
+    
+    2. List format (old):
         Stack: production
         Sites:
           - site1.example.com
-          - site2.example.com
-        
-        Stack: staging
-        Sites:
-          - site3.example.com
     
     Returns normalized JSON list:
     [
-      {"stack": "production", "site": "site1.example.com"},
-      {"stack": "production", "site": "site2.example.com"},
-      {"stack": "staging", "site": "site3.example.com"},
+      {"stack": "default", "site": "dev.mby-solution.vip"},
     ]
     """
     result: list[dict[str, Any]] = []
     current_stack: str | None = None
+    in_table = False
     
     for line in output.splitlines():
-        line = line.strip()
-        if not line:
+        line_stripped = line.strip()
+        if not line_stripped:
             continue
         
-        # Match "Stack: <name>"
-        stack_match = re.match(r"^Stack:\s*(.+)$", line, re.IGNORECASE)
+        # Check if this is a table row with site (starts with │)
+        if line_stripped.startswith("│"):
+            # Parse table row: │ site │ status │ path │
+            parts = [p.strip() for p in line_stripped.split("│") if p.strip()]
+            if parts and len(parts) >= 1:
+                site = parts[0].strip()
+                # Skip header rows that contain "Site" or "━"
+                if site and site.lower() != "site" and "━" not in site and "─" not in site:
+                    result.append({"stack": "default", "site": site})
+                    in_table = True
+            continue
+        
+        # Check for table borders (skip them)
+        if any(char in line_stripped for char in ["┏", "┃", "┗", "┓", "┛", "┣", "┫", "╋", "━", "┳", "┻", "╇", "┡", "└"]):
+            in_table = True
+            continue
+        
+        # Match "Stack: <name>" (old format)
+        stack_match = re.match(r"^Stack:\s*(.+)$", line_stripped, re.IGNORECASE)
         if stack_match:
             current_stack = stack_match.group(1).strip()
             continue
         
-        # Match site list items: "- <site>" or "  - <site>"
-        site_match = re.match(r"^[-•]\s*(.+)$", line)
-        if site_match and current_stack:
+        # Match site list items: "- <site>" or "  - <site>" (old format)
+        site_match = re.match(r"^[-•]\s*(.+)$", line_stripped)
+        if site_match:
             site = site_match.group(1).strip()
             if site:
-                result.append({"stack": current_stack, "site": site})
+                stack = current_stack or "default"
+                result.append({"stack": stack, "site": site})
     
     return result
 

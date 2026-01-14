@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
 from .fm_discovery import find_fm_binary
@@ -20,6 +21,15 @@ def create_app(*, fm_binary: Path | None, shared_secret: str | None) -> FastAPI:
     Create FastAPI app with allowlisted actions only.
     """
     app = FastAPI(title="fb-agent", version=__version__)
+    
+    # Add CORS middleware to allow Dashboard to fetch agent time
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
     
     if fm_binary is None:
         fm_binary = find_fm_binary()
@@ -46,16 +56,28 @@ def create_app(*, fm_binary: Path | None, shared_secret: str | None) -> FastAPI:
             raise HTTPException(status_code=401, detail="invalid_timestamp")
         
         # Get body for signature verification
-        body = b""
+        # Dashboard signs JSON bodies with canonical formatting (sorted keys, no spaces)
+        # We must normalize the body to match Dashboard's format
+        body_bytes = b"{}"
         if request.method in {"POST", "PUT", "PATCH"}:
-            body_bytes = await request.body()
-            body = body_bytes
+            raw_body = await request.body()
+            if raw_body:
+                try:
+                    import json
+                    body_obj = json.loads(raw_body)
+                    # Normalize to match Dashboard format
+                    body_bytes = json.dumps(body_obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                except Exception:
+                    # If not JSON, use raw bytes
+                    body_bytes = raw_body
+            else:
+                body_bytes = b"{}"
         
         if not verify_request(
             secret=app.state.shared_secret,
             method=request.method,
             path=request.url.path,
-            body=body,
+            body=body_bytes,
             signature=x_signature,
             req_timestamp=req_ts,
         ):
@@ -92,7 +114,7 @@ def create_app(*, fm_binary: Path | None, shared_secret: str | None) -> FastAPI:
         """
         Allowlisted action: backup site via fm shell + bench.
         """
-        require_auth(request, x_signature, x_timestamp)
+        await require_auth(request, x_signature, x_timestamp)
         
         try:
             payload = await request.json()
@@ -114,10 +136,12 @@ def create_app(*, fm_binary: Path | None, shared_secret: str | None) -> FastAPI:
             
             return JSONResponse(result, status_code=200 if result.get("ok") else 500)
         except Exception as e:
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+            import traceback
+            traceback.print_exc()
+            return JSONResponse({"ok": False, "error": str(e), "traceback": traceback.format_exc()}, status_code=500)
     
     @app.get("/api/backup_artifacts/{site}")
-    def api_backup_artifacts(
+    async def api_backup_artifacts(
         site: str,
         request: Request,
         x_signature: str | None = Header(None, alias="X-Signature"),
@@ -127,11 +151,87 @@ def create_app(*, fm_binary: Path | None, shared_secret: str | None) -> FastAPI:
         Allowlisted action: list backup artifacts for a site.
         Used by dashboard to discover backup files after backup completes.
         """
-        require_auth(request, x_signature, x_timestamp)
+        await require_auth(request, x_signature, x_timestamp)
         
         # TODO: Discover backup artifacts from bench backup output
         # For now, return empty list
         return JSONResponse({"ok": True, "artifacts": []})
+    
+    @app.get("/api/download_artifact")
+    async def api_download_artifact(
+        path: str,
+        request: Request,
+        x_signature: str | None = Header(None, alias="X-Signature"),
+        x_timestamp: str | None = Header(None, alias="X-Timestamp"),
+    ):
+        """
+        Download a backup artifact file from agent.
+        Path must be relative (e.g., ./site/private/backups/file.sql.gz)
+        """
+        from fastapi.responses import FileResponse
+        import subprocess
+        await require_auth(request, x_signature, x_timestamp)
+        
+        # Security: only allow paths starting with ./ (relative)
+        if not path.startswith('./'):
+            return JSONResponse({"ok": False, "error": "invalid_path"}, status_code=400)
+        
+        # Security: ensure path contains backup directory
+        if 'private/backups' not in path:
+            return JSONResponse({"ok": False, "error": "forbidden"}, status_code=403)
+        
+        # Extract site name from path (e.g., ./dev.mby-solution.vip/private/backups/...)
+        path_parts = path.lstrip('./').split('/')
+        if len(path_parts) < 3:
+            return JSONResponse({"ok": False, "error": "invalid_path"}, status_code=400)
+        
+        site_name = path_parts[0]
+        
+        # Get site's directory from fm list
+        try:
+            proc = subprocess.run(
+                [str(app.state.fm_binary), "list"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            
+            # Parse output to find site path
+            site_root = None
+            for line in proc.stdout.split('\n'):
+                if site_name in line and '│' in line:
+                    # Extract path from table: │ site │ status │ path │
+                    parts = [p.strip() for p in line.split('│') if p.strip()]
+                    if len(parts) >= 3 and parts[0] == site_name:
+                        site_root = parts[2].rstrip('…').rstrip('.')
+                        break
+            
+            if not site_root:
+                return JSONResponse({"ok": False, "error": "site_not_found"}, status_code=404)
+            
+            # Construct absolute path: site_root/workspace/frappe-bench/sites/ + relative path
+            # Path from bench is relative to frappe-bench/sites directory
+            bench_root = Path(site_root) / "workspace" / "frappe-bench" / "sites"
+            file_path = bench_root / path.lstrip('./')
+            
+            if not file_path.exists() or not file_path.is_file():
+                return JSONResponse({"ok": False, "error": "file_not_found", "tried": str(file_path)}, status_code=404)
+            
+            return FileResponse(path=str(file_path), filename=file_path.name)
+            
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    
+    @app.get("/api/time")
+    async def api_time() -> JSONResponse:
+        """Get current agent server time (no auth required)"""
+        import time
+        return JSONResponse({
+            "timestamp": int(time.time()),
+            "datetime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "timezone": time.strftime("%Z")
+        })
     
     return app
 

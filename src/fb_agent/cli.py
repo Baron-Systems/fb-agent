@@ -112,6 +112,68 @@ def run() -> None:
     # Create and run app
     app = create_app(fm_binary=fm_binary, shared_secret=shared_secret)
     
+    # Add periodic re-registration background task
+    dashboard_url = dashboard_info.get('base_url') if dashboard_info else None
+    
+    @app.on_event("startup")
+    async def startup_periodic_announce():
+        """Periodically re-register with dashboard to maintain presence"""
+        import asyncio
+        
+        async def announce_loop():
+            await asyncio.sleep(60)  # Wait 1 min after startup
+            
+            while True:
+                try:
+                    await asyncio.sleep(300)  # Every 5 minutes
+                    
+                    if not dashboard_url or not shared_secret:
+                        continue
+                    
+                    # Re-fetch sites for updated meta
+                    try:
+                        sites = list_sites(fm_binary)
+                        stacks_dict: dict[str, list[str]] = {}
+                        for site_info in sites:
+                            stack = str(site_info.get("stack") or "default")
+                            site = str(site_info.get("site") or "")
+                            if site:
+                                if stack not in stacks_dict:
+                                    stacks_dict[stack] = []
+                                stacks_dict[stack].append(site)
+                        
+                        meta = {
+                            "hostname": __import__("socket").gethostname(),
+                            "stacks": [
+                                {"stack": stack, "sites": sites_list}
+                                for stack, sites_list in stacks_dict.items()
+                            ]
+                        }
+                    except Exception:
+                        meta = {"hostname": __import__("socket").gethostname()}
+                    
+                    # Re-register
+                    try:
+                        resp = httpx.post(
+                            f"{dashboard_url}/api/agents/register",
+                            json={
+                                "token": "reannounce",  # Special token
+                                "agent_id": agent_id,
+                                "port": 8888,
+                                "meta": meta,
+                            },
+                            timeout=10.0,
+                        )
+                        if resp.status_code == 200:
+                            print(f"✓ Re-announced to dashboard")
+                    except Exception:
+                        pass  # Silent fail, retry in 5 min
+                        
+                except Exception:
+                    pass
+        
+        asyncio.create_task(announce_loop())
+    
     print("Starting agent API on http://0.0.0.0:8888")
     
     config = Config(app, host="0.0.0.0", port=8888, log_level="info")

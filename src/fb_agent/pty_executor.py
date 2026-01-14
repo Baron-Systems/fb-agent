@@ -74,6 +74,7 @@ def execute_backup_via_fm_shell(fm_binary: Path, site: str, timeout: int = 600) 
         
         # Detect success markers
         success_markers = [
+            "successfully completed",
             "backup completed",
             "backup successful",
             "backup created",
@@ -93,11 +94,26 @@ def execute_backup_via_fm_shell(fm_binary: Path, site: str, timeout: int = 600) 
         
         ok = proc.returncode == 0 and has_success and not has_error
         
+        # Extract backup file paths from output
+        # Example: "Database: ./dev.mby-solution.vip/private/backups/20260114_151615-dev_mby-solution_vip-database.sql.gz"
+        artifacts = []
+        # Split full_output into lines (not output_lines which are chunks)
+        for line in full_output.split('\n'):
+            # Look for lines like "Config  : <path>" or "Database: <path>"
+            if ':' in line and ('Config' in line or 'Database' in line or 'Private' in line or 'Public' in line):
+                parts = line.split(':', 1)
+                if len(parts) == 2:
+                    # Extract path (first word after colon)
+                    path = parts[1].strip().split()[0]
+                    if path and path.startswith('./'):
+                        artifacts.append({"type": parts[0].strip(), "path": path})
+        
         return {
             "ok": ok,
             "returncode": proc.returncode,
             "output": full_output,
             "stderr": "\n".join(error_lines),
+            "artifacts": artifacts,
         }
     
     except subprocess.TimeoutExpired:
