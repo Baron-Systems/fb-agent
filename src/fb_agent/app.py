@@ -57,7 +57,7 @@ def create_app(*, fm_binary: Path | None, shared_secret: str | None) -> FastAPI:
         
         # Get body for signature verification
         # Dashboard signs JSON bodies with canonical formatting (sorted keys, no spaces)
-        # We must normalize the body to match Dashboard's format
+        # For GET requests, body is empty {}
         body_bytes = b"{}"
         if request.method in {"POST", "PUT", "PATCH"}:
             raw_body = await request.body()
@@ -72,11 +72,16 @@ def create_app(*, fm_binary: Path | None, shared_secret: str | None) -> FastAPI:
                     body_bytes = raw_body
             else:
                 body_bytes = b"{}"
+        # For GET requests, Dashboard signs with empty body {}
+        # Path includes query params in signature (but we use path only for consistency)
+        
+        # Use path without query params for signature verification (Dashboard signs path only)
+        path_for_sig = request.url.path
         
         if not verify_request(
             secret=app.state.shared_secret,
             method=request.method,
-            path=request.url.path,
+            path=path_for_sig,
             body=body_bytes,
             signature=x_signature,
             req_timestamp=req_ts,
@@ -198,21 +203,68 @@ def create_app(*, fm_binary: Path | None, shared_secret: str | None) -> FastAPI:
             )
             
             # Parse output to find site path
+            # Note: fm list may truncate paths with '…', so we need to find the full path
             site_root = None
+            truncated_path = None
+            
             for line in proc.stdout.split('\n'):
                 if site_name in line and '│' in line:
                     # Extract path from table: │ site │ status │ path │
                     parts = [p.strip() for p in line.split('│') if p.strip()]
                     if len(parts) >= 3 and parts[0] == site_name:
-                        site_root = parts[2].rstrip('…').rstrip('.')
+                        truncated_path = parts[2].rstrip('…').rstrip('.')
                         break
             
-            if not site_root:
-                return JSONResponse({"ok": False, "error": "site_not_found"}, status_code=404)
+            # If path is truncated or doesn't exist, search for full path
+            # Check if truncated_path exists and is valid
+            if truncated_path:
+                test_path = Path(truncated_path)
+                if test_path.exists() and (test_path / "workspace" / "frappe-bench").exists():
+                    site_root = test_path
+                else:
+                    # Path is truncated or invalid, search for full path
+                    common_bases = [
+                        Path("/home/baron/frappe/sites"),
+                        Path("/opt/frappe/sites"),
+                        Path("/srv/frappe/sites"),
+                        Path.home() / "frappe" / "sites",
+                    ]
+                    
+                    for base in common_bases:
+                        if base.exists():
+                            for site_dir in base.iterdir():
+                                if site_dir.is_dir() and site_name in site_dir.name:
+                                    # Check if this looks like the right site
+                                    if (site_dir / "workspace" / "frappe-bench").exists():
+                                        site_root = site_dir
+                                        break
+                            if site_root:
+                                break
+            else:
+                # No path found in fm list, search anyway
+                common_bases = [
+                    Path("/home/baron/frappe/sites"),
+                    Path("/opt/frappe/sites"),
+                    Path("/srv/frappe/sites"),
+                    Path.home() / "frappe" / "sites",
+                ]
+                
+                for base in common_bases:
+                    if base.exists():
+                        for site_dir in base.iterdir():
+                            if site_dir.is_dir() and site_name in site_dir.name:
+                                if (site_dir / "workspace" / "frappe-bench").exists():
+                                    site_root = site_dir
+                                    break
+                        if site_root:
+                            break
+            
+            if not site_root or not site_root.exists():
+                return JSONResponse({"ok": False, "error": "site_not_found", "tried": str(truncated_path)}, status_code=404)
             
             # Construct absolute path: site_root/workspace/frappe-bench/sites/ + relative path
             # Path from bench is relative to frappe-bench/sites directory
-            bench_root = Path(site_root) / "workspace" / "frappe-bench" / "sites"
+            bench_root = site_root / "workspace" / "frappe-bench" / "sites"
             file_path = bench_root / path.lstrip('./')
             
             if not file_path.exists() or not file_path.is_file():

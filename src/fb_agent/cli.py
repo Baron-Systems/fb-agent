@@ -121,62 +121,88 @@ def run() -> None:
         import asyncio
         
         async def announce_loop():
-            await asyncio.sleep(60)  # Wait 1 min after startup
-            
-            while True:
-                try:
-                    await asyncio.sleep(300)  # Every 5 minutes
-                    
-                    if not dashboard_url or not shared_secret:
-                        continue
-                    
-                    # Re-fetch sites for updated meta
+            try:
+                await asyncio.sleep(60)  # Wait 1 min after startup
+                
+                while True:
                     try:
-                        sites = list_sites(fm_binary)
-                        stacks_dict: dict[str, list[str]] = {}
-                        for site_info in sites:
-                            stack = str(site_info.get("stack") or "default")
-                            site = str(site_info.get("site") or "")
-                            if site:
-                                if stack not in stacks_dict:
-                                    stacks_dict[stack] = []
-                                stacks_dict[stack].append(site)
+                        await asyncio.sleep(300)  # Every 5 minutes
                         
-                        meta = {
-                            "hostname": __import__("socket").gethostname(),
-                            "stacks": [
-                                {"stack": stack, "sites": sites_list}
-                                for stack, sites_list in stacks_dict.items()
-                            ]
-                        }
-                    except Exception:
-                        meta = {"hostname": __import__("socket").gethostname()}
-                    
-                    # Re-register
-                    try:
-                        resp = httpx.post(
-                            f"{dashboard_url}/api/agents/register",
-                            json={
-                                "token": "reannounce",  # Special token
-                                "agent_id": agent_id,
-                                "port": 8888,
-                                "meta": meta,
-                            },
-                            timeout=10.0,
-                        )
-                        if resp.status_code == 200:
-                            print(f"✓ Re-announced to dashboard")
-                    except Exception:
-                        pass  # Silent fail, retry in 5 min
+                        if not dashboard_url or not shared_secret:
+                            continue
                         
-                except Exception:
-                    pass
+                        # Re-fetch sites for updated meta
+                        try:
+                            sites = list_sites(fm_binary)
+                            stacks_dict: dict[str, list[str]] = {}
+                            for site_info in sites:
+                                stack = str(site_info.get("stack") or "default")
+                                site = str(site_info.get("site") or "")
+                                if site:
+                                    if stack not in stacks_dict:
+                                        stacks_dict[stack] = []
+                                    stacks_dict[stack].append(site)
+                            
+                            meta = {
+                                "hostname": __import__("socket").gethostname(),
+                                "stacks": [
+                                    {"stack": stack, "sites": sites_list}
+                                    for stack, sites_list in stacks_dict.items()
+                                ]
+                            }
+                        except Exception:
+                            meta = {"hostname": __import__("socket").gethostname()}
+                        
+                        # Re-register
+                        try:
+                            resp = httpx.post(
+                                f"{dashboard_url}/api/agents/register",
+                                json={
+                                    "token": "reannounce",  # Special token
+                                    "agent_id": agent_id,
+                                    "port": 8888,
+                                    "meta": meta,
+                                },
+                                timeout=10.0,
+                            )
+                            if resp.status_code == 200:
+                                print(f"✓ Re-announced to dashboard", flush=True)
+                        except Exception:
+                            pass  # Silent fail, retry in 5 min
+                            
+                    except asyncio.CancelledError:
+                        # Graceful shutdown
+                        break
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                # Task was cancelled during shutdown
+                pass
         
-        asyncio.create_task(announce_loop())
+        announce_task = asyncio.create_task(announce_loop())
+        
+        # Store task for cleanup
+        app.state.announce_task = announce_task
     
     print("Starting agent API on http://0.0.0.0:8888")
+    print("Press Ctrl+C to stop", flush=True)
     
     config = Config(app, host="0.0.0.0", port=8888, log_level="info")
     server = Server(config)
-    server.run()
+    
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        print("\nINFO: Agent shutting down gracefully...", flush=True)
+        # Cancel announce task if it exists
+        if hasattr(app.state, 'announce_task'):
+            try:
+                app.state.announce_task.cancel()
+            except Exception:
+                pass
+        # Server will handle cleanup automatically
+        sys.exit(0)
+    except Exception as e:
+        print(f"ERROR: Agent crashed: {e}", flush=True, file=sys.stderr)
+        sys.exit(1)
 
