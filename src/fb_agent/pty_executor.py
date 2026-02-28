@@ -35,7 +35,7 @@ def execute_backup_via_fm_shell(fm_binary: Path, site: str, timeout: int = 600) 
         # Send commands via master
         
         commands = [
-            f"bench --site {site} backup\n",
+            f"bench --site {site} backup --with-files\n",
             "exit\n",
         ]
         
