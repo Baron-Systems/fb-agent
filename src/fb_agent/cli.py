@@ -43,9 +43,15 @@ def run() -> None:
     agent_id = generate_stable_agent_id()
     print(f"Agent ID: {agent_id}")
     
-    # Discover dashboard
-    print("Discovering dashboard...")
-    dashboard_info = discover_dashboard(agent_id=agent_id, agent_port=8888, timeout=10.0)
+        # Discover dashboard (or use fixed URL from env)
+    dashboard_info = None
+    dashboard_url_env = (os.environ.get("FB_DASHBOARD_URL") or "").strip().rstrip("/")
+    if dashboard_url_env:
+        print(f"Using dashboard URL from FB_DASHBOARD_URL: {dashboard_url_env}")
+        dashboard_info = {"base_url": dashboard_url_env, "token": "reannounce"}
+    else:
+        print("Discovering dashboard...")
+        dashboard_info = discover_dashboard(agent_id=agent_id, agent_port=8888, timeout=10.0)
     
     shared_secret: str | None = None
     
