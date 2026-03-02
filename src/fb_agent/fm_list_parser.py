@@ -40,18 +40,21 @@ def parse_fm_list_output(output: str) -> list[dict[str, Any]]:
             continue
 
         # Skip common table border lines (unicode/ascii).
+        # NOTE: keep "┃" out of this check because some fm versions use it
+        # for actual data rows, not just headers/borders.
         if (
-            any(char in line_stripped for char in ["┏", "┃", "┗", "┓", "┛", "┣", "┫", "╋", "━", "┳", "┻", "╇", "┡", "└"])
+            any(char in line_stripped for char in ["┏", "┗", "┓", "┛", "┣", "┫", "╋", "━", "┳", "┻", "╇", "┡", "└"])
             or re.fullmatch(r"[-+|= ]+", line_stripped)
         ):
             in_table = True
             continue
 
-        # Parse table rows in either unicode "│" or ascii "|" format.
+        # Parse table rows in unicode/ascii pipe formats.
         # Examples:
         #   │ al.com │ Active │ /path │
+        #   ┃ al.com ┃ Active ┃ /path ┃
         #   | al.com | Active | /path |
-        for sep in ("│", "|"):
+        for sep in ("│", "┃", "|"):
             if sep in line_stripped and line_stripped.startswith(sep):
                 parts = [p.strip() for p in line_stripped.split(sep) if p.strip()]
                 if parts:
