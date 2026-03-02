@@ -84,7 +84,19 @@ def parse_fm_list_output(output: str) -> list[dict[str, Any]]:
             if site:
                 stack = current_stack or "default"
                 result.append({"stack": stack, "site": site})
-    
+
+    # Fallback: some fm versions/term modes render table output in a way
+    # that does not preserve clean column separators. If primary parsing
+    # yields nothing, extract site names from common bench paths:
+    #   .../sites/<site_name>
+    if not result:
+        seen: set[str] = set()
+        for m in re.finditer(r"/sites/([A-Za-z0-9._-]+)", output):
+            site = m.group(1).strip()
+            if site and site not in seen:
+                seen.add(site)
+                result.append({"stack": "default", "site": site})
+
     return result
 
 
