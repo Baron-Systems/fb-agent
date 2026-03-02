@@ -30,26 +30,42 @@ def parse_fm_list_output(output: str) -> list[dict[str, Any]]:
     current_stack: str | None = None
     in_table = False
     
+    ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
     for line in output.splitlines():
-        line_stripped = line.strip()
+        # Remove ANSI color/control sequences before parsing.
+        line_clean = ansi_escape.sub("", line)
+        line_stripped = line_clean.strip()
         if not line_stripped:
             continue
-        
-        # Check if this is a table row with site (starts with │)
-        if line_stripped.startswith("│"):
-            # Parse table row: │ site │ status │ path │
-            parts = [p.strip() for p in line_stripped.split("│") if p.strip()]
-            if parts and len(parts) >= 1:
-                site = parts[0].strip()
-                # Skip header rows that contain "Site" or "━"
-                if site and site.lower() != "site" and "━" not in site and "─" not in site:
-                    result.append({"stack": "default", "site": site})
-                    in_table = True
-            continue
-        
-        # Check for table borders (skip them)
-        if any(char in line_stripped for char in ["┏", "┃", "┗", "┓", "┛", "┣", "┫", "╋", "━", "┳", "┻", "╇", "┡", "└"]):
+
+        # Skip common table border lines (unicode/ascii).
+        if (
+            any(char in line_stripped for char in ["┏", "┃", "┗", "┓", "┛", "┣", "┫", "╋", "━", "┳", "┻", "╇", "┡", "└"])
+            or re.fullmatch(r"[-+|= ]+", line_stripped)
+        ):
             in_table = True
+            continue
+
+        # Parse table rows in either unicode "│" or ascii "|" format.
+        # Examples:
+        #   │ al.com │ Active │ /path │
+        #   | al.com | Active | /path |
+        for sep in ("│", "|"):
+            if sep in line_stripped and line_stripped.startswith(sep):
+                parts = [p.strip() for p in line_stripped.split(sep) if p.strip()]
+                if parts:
+                    site = parts[0].strip()
+                    # Skip headers/separators
+                    if site and site.lower() not in {"site", "sites"} and "━" not in site and "─" not in site:
+                        result.append({"stack": "default", "site": site})
+                        in_table = True
+                        break
+        else:
+            # Not a table row; continue with old-format parsing below.
+            pass
+        if in_table and result:
+            # Row already parsed as table format.
             continue
         
         # Match "Stack: <name>" (old format)
