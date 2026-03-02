@@ -112,5 +112,10 @@ def list_sites(fm_binary: Path) -> list[dict[str, Any]]:
         check=True,
         timeout=30,
     )
-    return parse_fm_list_output(proc.stdout)
+    # Some fm versions/term modes print table output to stderr.
+    # Parse both streams to avoid returning an empty list unexpectedly.
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    merged = "\n".join(part for part in (stdout, stderr) if part)
+    return parse_fm_list_output(merged)
 
